@@ -135,6 +135,7 @@ class Monitor extends BeanModel {
             path,
             pathName,
             parent: this.parent,
+            dependencyId: this.dependencyId,
             childrenIDs: preloadData.childrenIDs.get(this.id) || [],
             url: this.url,
             wsIgnoreSecWebsocketAcceptHeader: this.getWsIgnoreSecWebsocketAcceptHeader(),
@@ -1060,6 +1061,11 @@ class Monitor extends BeanModel {
                 }
             }
 
+            // Retry a notification deferred while the dependency was unavailable.
+            if (!isImportant && this.dependencyId && (bean.status === UP || bean.status === DOWN)) {
+                await Monitor.flushDependencyNotification(this, bean);
+            }
+
             if (bean.status !== MAINTENANCE && Boolean(this.domainExpiryNotification)) {
                 try {
                     const supportInfo = await DomainExpiry.checkSupport(this);
@@ -1534,6 +1540,21 @@ class Monitor extends BeanModel {
      * @returns {Promise<void>}
      */
     static async sendNotification(isFirstBeat, monitor, bean) {
+        if (monitor.dependencyId && (bean.status === UP || bean.status === DOWN)) {
+            const pending = await R.getCell("SELECT dependency_pending FROM monitor WHERE id = ?", [monitor.id]);
+            if (!(await Monitor.dependencyAvailable(monitor))) {
+                // A suppressed DOWN followed by UP needs no notification; a suppressed UP
+                // must be delivered later if the preceding DOWN was already delivered.
+                const next = bean.status === DOWN ? (pending === 2 ? 0 : 1) : (pending === 1 ? 0 : 2);
+                await R.exec("UPDATE monitor SET dependency_pending = ? WHERE id = ?", [next, monitor.id]);
+                return;
+            }
+            if (bean.status === UP && pending === 1) {
+                await R.exec("UPDATE monitor SET dependency_pending = 0 WHERE id = ?", [monitor.id]);
+                return;
+            }
+            await R.exec("UPDATE monitor SET dependency_pending = 0 WHERE id = ?", [monitor.id]);
+        }
         if (!isFirstBeat || bean.status === DOWN) {
             const notificationList = await Monitor.getNotificationList(monitor);
 
@@ -1599,6 +1620,58 @@ class Monitor extends BeanModel {
                     log.error("monitor", e);
                 }
             }
+        }
+    }
+
+    /**
+     * Check the dependency status.
+     * @param {Monitor} monitor Dependent monitor
+     * @returns {Promise<boolean>} Whether the dependency is up
+     */
+    static async dependencyAvailable(monitor) {
+        const row = await R.getRow(`SELECT m.active, h.status FROM monitor m
+            LEFT JOIN heartbeat h ON h.id = (SELECT id FROM heartbeat WHERE monitor_id = m.id ORDER BY time DESC, id DESC LIMIT 1)
+            WHERE m.id = ? AND m.user_id = ?`, [monitor.dependencyId, monitor.user_id]);
+        return Boolean(row && row.active && row.status === UP);
+    }
+
+    /**
+     * Reconcile deferred transitions after recovery.
+     * @param {Monitor} monitor Dependent monitor
+     * @param {object} bean Current heartbeat
+     * @returns {Promise<void>}
+     */
+    static async flushDependencyNotification(monitor, bean) {
+        const pending = await R.getCell("SELECT dependency_pending FROM monitor WHERE id = ?", [monitor.id]);
+        if (pending && await Monitor.dependencyAvailable(monitor)) {
+            if ((pending === 1 && bean.status === DOWN) || (pending === 2 && bean.status === UP)) {
+                await Monitor.sendNotification(false, monitor, bean);
+            } else {
+                await R.exec("UPDATE monitor SET dependency_pending = 0 WHERE id = ?", [monitor.id]);
+            }
+        }
+    }
+
+    /**
+     * Validate ownership and prevent dependency cycles.
+     * @param {number} id Monitor ID
+     * @param {number} dependencyId Dependency ID
+     * @param {number} userId Owner ID
+     * @returns {Promise<void>}
+     */
+    static async validateDependency(id, dependencyId, userId) {
+        const visited = new Set(id ? [Number(id)] : []);
+        let current = dependencyId;
+        while (current) {
+            if (visited.has(Number(current))) {
+                throw new Error("Monitor dependencies cannot form a cycle");
+            }
+            visited.add(Number(current));
+            const row = await R.getRow("SELECT dependency_id FROM monitor WHERE id = ? AND user_id = ?", [current, userId]);
+            if (!row) {
+                throw new Error("Invalid dependency monitor");
+            }
+            current = row.dependency_id;
         }
     }
 

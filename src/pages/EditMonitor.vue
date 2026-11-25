@@ -2213,6 +2213,15 @@
                                 />
                             </div>
 
+                            <div class="my-3">
+                                <label for="dependencyMonitor" class="form-label">Notification dependency</label>
+                                <select id="dependencyMonitor" v-model="monitor.dependencyId" class="form-select">
+                                    <option :value="null">None</option>
+                                    <option v-for="item in dependencyMonitorOptions" :key="item.id" :value="item.id">{{ item.name }}</option>
+                                </select>
+                                <div class="form-text">Defer notifications while this monitor is not up. Use retries so the dependency detects an outage first.</div>
+                            </div>
+
                             <!-- Description -->
                             <div class="my-3">
                                 <label for="description" class="form-label">{{ $t("Description") }}</label>
@@ -3308,6 +3317,7 @@ const monitorDefaults = {
     type: "http",
     name: "",
     parent: null,
+    dependencyId: null,
     url: defaultValueList.http.url,
     wsSubprotocol: "",
     method: "GET",
@@ -3595,8 +3605,12 @@ message HealthCheckResponse {
             return null;
         },
 
+        dependencyMonitorOptions() {
+            return Object.values(this.$root.monitorList).filter((item) => item.id !== this.monitor.id && item.type !== "push");
+        },
+
         // Filter result by active state, weight and alphabetical
-        // Only return groups which arent't itself and one of its descendants
+        // Only return groups which aren't itself and one of its descendants
         sortedGroupMonitorList() {
             let result = Object.values(this.$root.monitorList);
 

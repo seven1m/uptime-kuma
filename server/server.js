@@ -468,6 +468,7 @@ app.use(function (req, res, next) {
                 }
                 bean.user_id = socket.userID;
 
+                await Monitor.validateDependency(bean.id, bean.dependencyId, socket.userID);
                 bean.validate();
 
                 await R.store(bean);
@@ -527,6 +528,10 @@ app.use(function (req, res, next) {
                 bean.name = monitor.name;
                 bean.description = monitor.description;
                 bean.parent = monitor.parent;
+                if (bean.dependencyId !== (monitor.dependencyId || null)) {
+                    bean.dependencyPending = 0;
+                }
+                bean.dependencyId = monitor.dependencyId || null;
                 bean.type = monitor.type;
                 bean.subtype = monitor.subtype;
                 bean.url = monitor.url;
@@ -649,6 +654,7 @@ app.use(function (req, res, next) {
                 bean.ping_count = monitor.ping_count;
                 bean.ping_per_request_timeout = monitor.ping_per_request_timeout;
 
+                await Monitor.validateDependency(bean.id, bean.dependencyId, socket.userID);
                 bean.validate();
 
                 await R.store(bean);
